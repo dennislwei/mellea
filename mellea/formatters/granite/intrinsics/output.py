@@ -684,6 +684,18 @@ class DecodeSentences(AddFieldsTransformation):
                 # Use second-to-last as the boundary if an instruction turn was added
                 last_ix = -2 if self.config["instruction"] else -1
                 history_messages = chat_completion.messages[:last_ix]
+                # These are all but the last message of the original conversation.
+                # Documents moved into the messages (docs_as_message) were not part
+                # of it, so remove them first; this also keeps message indices
+                # relative to the original conversation.
+                if self.config["docs_as_message"] == "json":
+                    history_messages = history_messages[1:]
+                elif self.config["docs_as_message"] == "roles":
+                    history_messages = [
+                        m
+                        for m in history_messages
+                        if not m.role.startswith("document ")
+                    ]
                 for i, message in enumerate(history_messages):
                     local_results = _desplit_sentences(
                         message.content, tag, next_sentence_num

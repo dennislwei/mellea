@@ -28,6 +28,7 @@ from mellea.formatters.granite import (
     ChatCompletion,
     ChatCompletionResponse,
     IntrinsicsResultProcessor,
+    IntrinsicsRewriter,
 )
 from mellea.formatters.granite.intrinsics.output import DecodeSentences
 
@@ -687,3 +688,65 @@ def test_decode_sentences_valid_indices_decode_unchanged_context_attribution():
     )
     parsed = get_io_contract("context-attribution").parse(raw_content)
     assert len(parsed["items"]) == 5  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("docs_as_message", ["json", "roles"])
+def test_decode_sentences_conversation_with_docs_as_message(docs_as_message):
+    """Sentences in documents moved into the messages are not decoded as history.
+
+    With `docs_as_message`, input processing numbers the document sentences and then
+    moves the documents into the messages, ahead of the conversation. Decoding
+    `all_but_last_message` must skip them, both to find the history's sentence
+    numbers and to report message indices relative to the original conversation.
+    """
+    config = {**_CONTEXT_ATTRIBUTION_CONFIG_DICT, "docs_as_message": docs_as_message}
+    rewriter = IntrinsicsRewriter(config_dict=config)
+    processor = IntrinsicsResultProcessor(config_dict=config)
+    request = rewriter.transform(
+        {
+            "messages": [
+                {"role": "user", "content": "Who wrote it?"},
+                {"role": "assistant", "content": "Which book?"},
+                {"role": "user", "content": "The one about bumble fish."},
+                {"role": "assistant", "content": "Jane Doe wrote it."},
+            ],
+            "extra_body": {
+                "documents": [
+                    {"doc_id": "a", "text": "Bumble fish are yellow."},
+                    {
+                        "doc_id": "b",
+                        "text": "Jane Doe wrote a book about bumble fish. It sold well.",
+                    },
+                ]
+            },
+        }
+    )
+    # Sentences 0-2 are in the documents and 3-5 in the conversation before the response
+    model_out = ChatCompletionResponse.model_validate(
+        {
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": json.dumps([{"r": 0, "c": [1, 3, 5]}]),
+                    },
+                }
+            ]
+        }
+    )
+
+    transformed = processor.transform(model_out, request)
+    raw_content = transformed.choices[0].message.content
+    assert raw_content is not None
+    records = json.loads(raw_content)
+    assert [
+        (r["attribution_doc_id"], r["attribution_msg_index"], r["attribution_text"])
+        for r in records
+    ] == [
+        # A sentence's text runs up to the next one, so includes the space between them
+        ("b", None, "Jane Doe wrote a book about bumble fish. "),
+        (None, 0, "Who wrote it?"),
+        (None, 2, "The one about bumble fish."),
+    ]
+    assert all(r["response_text"] == "Jane Doe wrote it." for r in records)
